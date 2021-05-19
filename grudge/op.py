@@ -1075,6 +1075,23 @@ def integral(dcoll, vec, dd=None):
 
 # {{{  Elementwise reductions
 
+def _map_elementwise_reduction(actx, op_name):
+    @memoize_in(actx, (_map_elementwise_reduction,
+                       "elementwise_%s_prg" % op_name))
+    def prg():
+        return make_loopy_program(
+            [
+                "{[iel]: 0 <= iel < nelements}",
+                "{[idof, jdof]: 0 <= idof, jdof < ndofs}"
+            ],
+            """
+                result[iel, idof] = %s(jdof, operand[iel, jdof])
+            """ % op_name,
+            name="grudge_elementwise_%s_knl" % op_name
+        )
+    return prg()
+
+
 def elementwise_sum(dcoll, *args):
     r"""Returns a vector of DOFs with all entries on each element set
     to the sum of DOFs on that element.
@@ -1105,23 +1122,59 @@ def elementwise_sum(dcoll, *args):
     actx = vec.array_context
     vec = project(dcoll, "vol", dd, vec)
 
-    @memoize_in(actx, (elementwise_sum, "elementwise_sum_prg"))
-    def prg():
-        return make_loopy_program(
-            [
-                "{[iel]: 0 <= iel < nelements}",
-                "{[idof, jdof]: 0 <= idof, jdof < ndofs}"
-            ],
-            """
-                result[iel, idof] = sum(jdof, operand[iel, jdof])
-            """,
-            name="grudge_elementwise_sum_knl"
+    return DOFArray(
+        actx,
+        tuple(
+            actx.call_loopy(
+                _map_elementwise_reduction(actx, "sum"),
+                operand=vec_i)["result"]
+            for vec_i in vec
         )
+    )
+
+
+def elementwise_max(dcoll, *args):
+    r"""Returns a vector of DOFs with all entries on each element set
+    to the maximum over all DOFs on that element.
+
+    May be called with ``(dcoll, vec)`` or ``(dcoll, dd, vec)``.
+
+    :arg dcoll: a :class:`grudge.discretization.DiscretizationCollection`.
+    :arg dd: a :class:`~grudge.dof_desc.DOFDesc`, or a value convertible to one.
+        Defaults to the base volume discretization if not provided.
+    :arg vec: a :class:`~meshmode.dof_array.DOFArray`
+    :returns: a :class:`~meshmode.dof_array.DOFArray` whose entries
+        denote the element-wise max of *vec*.
+    """
+
+    if len(args) == 1:
+        vec, = args
+        dd = dof_desc.DOFDesc("vol", dof_desc.DISCR_TAG_BASE)
+    elif len(args) == 2:
+        dd, vec = args
+    else:
+        raise TypeError("invalid number of arguments")
+
+    dd = dof_desc.as_dofdesc(dd)
+
+    if isinstance(vec, np.ndarray):
+        return obj_array_vectorize(
+            lambda vi: elementwise_max(dcoll, dd, vi), vec
+        )
+
+    actx = vec.array_context
+    vec = project(dcoll, "vol", dd, vec)
 
     return DOFArray(
         actx,
-        tuple(actx.call_loopy(prg(), operand=vec_i)["result"] for vec_i in vec)
+        tuple(
+            actx.call_loopy(
+                _map_elementwise_reduction(actx, "max"),
+                operand=vec_i)["result"]
+            for vec_i in vec
+        )
     )
+
 
 # }}}
 
